@@ -119,26 +119,30 @@ else
   echo "Warning: Could not retrieve Gateway URL"
 fi
 
-echo "Creating GitHub access token secret..."
-if [ -z "$GITHUB_ACCESS_TOKEN" ]; then
-  echo "Warning: GITHUB_ACCESS_TOKEN environment variable not set. Skipping secret creation."
-  echo "To create the secret manually, run:"
-  echo "  kubectl create secret generic github-access-token -n default --from-literal=apiKey=YOUR_TOKEN"
-else
-  kubectl create secret generic github-access-token -n default \
-    --from-literal=apiKey="$GITHUB_ACCESS_TOKEN" \
-    --dry-run=client -o yaml | kubectl apply -f -
-  echo "GitHub access token secret created successfully."
-fi
-
 echo "Applying MCP route configuration..."
 kubectl apply -f mcp-route.yaml
+
+echo "Waiting for MCP Gateway to be programmed..."
+kubectl wait --timeout=2m \
+  -n default \
+  gateway/aigw-run \
+  --for=condition=Programmed 2>/dev/null || echo "Gateway not ready yet"
 
 echo "Waiting for MCP Gateway pods to be ready..."
 kubectl wait pods --timeout=2m \
   -l gateway.envoyproxy.io/owning-gateway-name=aigw-run \
   -n envoy-gateway-system \
-  --for=condition=Ready 2>/dev/null || echo "Gateway pods not ready yet (this is normal during initial setup)"
+  --for=condition=Ready 2>/dev/null || echo "Gateway pods not ready yet"
+
+echo "Waiting for MCP Gateway to have an address..."
+for i in {1..30}; do
+  MCP_GATEWAY_URL=$(kubectl get gateway/aigw-run -n default -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "")
+  if [ -n "$MCP_GATEWAY_URL" ]; then
+    break
+  fi
+  echo "Waiting for Gateway address... (attempt $i/30)"
+  sleep 2
+done
 
 echo ""
 echo "========================================="
@@ -146,9 +150,6 @@ echo "Setup complete!"
 echo "========================================="
 echo "Cluster name: $CLUSTER_NAME"
 echo ""
-
-# Get the MCP Gateway URL
-MCP_GATEWAY_URL=$(kubectl get gateway/aigw-run -n default -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "")
 
 if [ -n "$MCP_GATEWAY_URL" ]; then
   echo "MCP Gateway URL: http://${MCP_GATEWAY_URL}:1975"
@@ -170,6 +171,117 @@ if [ -n "$MCP_GATEWAY_URL" ]; then
 else
   echo "Warning: Could not retrieve MCP Gateway URL"
   echo "Check gateway status with: kubectl get gateway -A"
+fi
+
+echo "Creating MCP ClusterIP Service..."
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-gateway-svc
+  namespace: envoy-gateway-system
+  labels:
+    app: mcp-gateway
+spec:
+  type: ClusterIP
+  selector:
+    gateway.envoyproxy.io/owning-gateway-name: aigw-run
+    gateway.envoyproxy.io/owning-gateway-namespace: default
+  ports:
+    - name: mcp
+      port: 1975
+      targetPort: 1975
+      protocol: TCP
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-default-to-envoy-gateway-system
+  namespace: envoy-gateway-system
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: default
+  to:
+    - group: ""
+      kind: Service
+      name: mcp-gateway-svc
+EOF
+
+echo "Creating Istio Gateway and HTTPRoute for MCP..."
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mcp-gateway
+  namespace: default
+  labels:
+    istio: ingressgateway
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: mcp
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-route-istio
+  namespace: default
+spec:
+  parentRefs:
+    - name: mcp-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+      backendRefs:
+        - kind: Service
+          name: mcp-gateway-svc
+          namespace: envoy-gateway-system
+          port: 1975
+EOF
+
+echo "Waiting for Istio Gateway to be programmed..."
+kubectl wait --timeout=2m \
+  -n default \
+  gateway/mcp-gateway \
+  --for=condition=Programmed 2>/dev/null || echo "Istio Gateway not ready yet"
+
+echo "Waiting for Istio Gateway to have an address..."
+for i in {1..30}; do
+  ISTIO_GATEWAY_URL=$(kubectl get gateway/mcp-gateway -n default -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "")
+  if [ -n "$ISTIO_GATEWAY_URL" ]; then
+    break
+  fi
+  echo "Waiting for Istio Gateway address... (attempt $i/30)"
+  sleep 2
+done
+
+if [ -n "$ISTIO_GATEWAY_URL" ]; then
+  echo ""
+  echo "Istio Gateway URL: http://${ISTIO_GATEWAY_URL}:8080"
+  echo ""
+  echo "Test MCP via Istio Gateway:"
+  echo ""
+  echo "# Initialize MCP session via Istio:"
+  echo "SESSION_ID=\$(curl -s -i -X POST http://${ISTIO_GATEWAY_URL}:8080/mcp \\"
+  echo "  -H 'Content-Type: application/json' \\"
+  echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {}}' \\"
+  echo "  | grep -i '^mcp-session-id:' | cut -d' ' -f2 | tr -d '\\r')"
+  echo ""
+  echo "# List available tools via Istio:"
+  echo "curl -X POST http://${ISTIO_GATEWAY_URL}:8080/mcp \\"
+  echo "  -H 'Content-Type: application/json' \\"
+  echo "  -H \"MCP-Session-ID: \$SESSION_ID\" \\"
+  echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/list\", \"params\": {}}'"
+  echo ""
 fi
 
 echo "========================================="
