@@ -52,50 +52,11 @@ else
   helm install istiod istio/istiod -n istio-system --wait
 fi
 
-echo "Deploying standalone MCP AI Gateway..."
+echo "Deploying standalone MCP AI Gateway with Istio Gateway..."
 kubectl apply -f mcp-proxy-direct.yaml
 
 echo "Waiting for MCP AI Gateway to be ready..."
 kubectl wait --timeout=2m -n default deployment/mcp-proxy-direct --for=condition=Available
-
-echo "Creating Istio Gateway and HTTPRoute for MCP..."
-kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: mcp-gateway
-  namespace: default
-  labels:
-    istio: ingressgateway
-spec:
-  gatewayClassName: istio
-  listeners:
-    - name: mcp
-      port: 8080
-      protocol: HTTP
-      allowedRoutes:
-        namespaces:
-          from: All
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: mcp-route
-  namespace: default
-spec:
-  parentRefs:
-    - name: mcp-gateway
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /mcp
-      backendRefs:
-        - kind: Service
-          name: mcp-proxy-direct
-          namespace: default
-          port: 1975
-EOF
 
 echo "Waiting for Istio Gateway to be programmed..."
 kubectl wait --timeout=2m \

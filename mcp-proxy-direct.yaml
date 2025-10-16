@@ -1,6 +1,6 @@
-# Standalone MCP Proxy Deployment
-# This deployment runs the AI Gateway CLI directly with MCP configuration,
-# exposing the MCP proxy on port 9856 without going through Envoy Gateway's Envoy.
+# Standalone MCP AI Gateway
+# This deployment runs the AI Gateway CLI (aigw run) with MCP configuration,
+# along with an Istio Gateway and HTTPRoute for ingress traffic.
 
 ---
 apiVersion: v1
@@ -98,3 +98,39 @@ spec:
       port: 1064
       targetPort: 1064
       protocol: TCP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mcp-gateway
+  namespace: default
+  labels:
+    istio: ingressgateway
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: mcp
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: mcp-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+      backendRefs:
+        - kind: Service
+          name: mcp-proxy-direct
+          namespace: default
+          port: 1975
