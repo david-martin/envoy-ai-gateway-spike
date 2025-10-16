@@ -209,6 +209,12 @@ spec:
       name: mcp-gateway-svc
 EOF
 
+echo "Deploying standalone MCP proxy..."
+kubectl apply -f mcp-proxy-direct.yaml
+
+echo "Waiting for MCP proxy to be ready..."
+kubectl wait --timeout=2m -n default deployment/mcp-proxy-direct --for=condition=Available 2>/dev/null || echo "MCP proxy not ready yet"
+
 echo "Creating Istio Gateway and HTTPRoute for MCP..."
 kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
@@ -221,8 +227,14 @@ metadata:
 spec:
   gatewayClassName: istio
   listeners:
-    - name: mcp
+    - name: mcp-via-envoy-gateway
       port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: mcp-direct
+      port: 8081
       protocol: HTTP
       allowedRoutes:
         namespaces:
@@ -231,11 +243,12 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: mcp-route-istio
+  name: mcp-route-via-envoy-gateway
   namespace: default
 spec:
   parentRefs:
     - name: mcp-gateway
+      sectionName: mcp-via-envoy-gateway
   rules:
     - matches:
         - path:
@@ -245,6 +258,26 @@ spec:
         - kind: Service
           name: mcp-gateway-svc
           namespace: envoy-gateway-system
+          port: 1975
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-route-direct
+  namespace: default
+spec:
+  parentRefs:
+    - name: mcp-gateway
+      sectionName: mcp-direct
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+      backendRefs:
+        - kind: Service
+          name: mcp-proxy-direct
+          namespace: default
           port: 1975
 EOF
 
@@ -266,20 +299,40 @@ done
 
 if [ -n "$ISTIO_GATEWAY_URL" ]; then
   echo ""
-  echo "Istio Gateway URL: http://${ISTIO_GATEWAY_URL}:8080"
+  echo "Istio Gateway URL: http://${ISTIO_GATEWAY_URL}"
   echo ""
-  echo "Test MCP via Istio Gateway:"
+  echo "========================================="
+  echo "Two paths available for comparison:"
+  echo "========================================="
   echo ""
-  echo "# Initialize MCP session via Istio:"
+  echo "1. Via Envoy Gateway (port 8080) - Goes through both Istio Envoy AND Envoy Gateway's Envoy"
+  echo "   Path: Istio Envoy -> Envoy Gateway Envoy -> MCP Proxy -> Backend"
+  echo ""
+  echo "# Initialize MCP session via Envoy Gateway:"
   echo "SESSION_ID=\$(curl -s -i -X POST http://${ISTIO_GATEWAY_URL}:8080/mcp \\"
   echo "  -H 'Content-Type: application/json' \\"
   echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {}}' \\"
   echo "  | grep -i '^mcp-session-id:' | cut -d' ' -f2 | tr -d '\\r')"
   echo ""
-  echo "# List available tools via Istio:"
   echo "curl -X POST http://${ISTIO_GATEWAY_URL}:8080/mcp \\"
   echo "  -H 'Content-Type: application/json' \\"
   echo "  -H \"MCP-Session-ID: \$SESSION_ID\" \\"
+  echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/list\", \"params\": {}}'"
+  echo ""
+  echo "----------------------------------------"
+  echo ""
+  echo "2. Direct to MCP Proxy (port 8081) - Only goes through Istio Envoy"
+  echo "   Path: Istio Envoy -> MCP Proxy -> Backend"
+  echo ""
+  echo "# Initialize MCP session directly:"
+  echo "SESSION_ID_DIRECT=\$(curl -s -i -X POST http://${ISTIO_GATEWAY_URL}:8081/mcp \\"
+  echo "  -H 'Content-Type: application/json' \\"
+  echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {}}' \\"
+  echo "  | grep -i '^mcp-session-id:' | cut -d' ' -f2 | tr -d '\\r')"
+  echo ""
+  echo "curl -X POST http://${ISTIO_GATEWAY_URL}:8081/mcp \\"
+  echo "  -H 'Content-Type: application/json' \\"
+  echo "  -H \"MCP-Session-ID: \$SESSION_ID_DIRECT\" \\"
   echo "  -d '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/list\", \"params\": {}}'"
   echo ""
 fi

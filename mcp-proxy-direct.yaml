@@ -1,0 +1,100 @@
+# Standalone MCP Proxy Deployment
+# This deployment runs the AI Gateway CLI directly with MCP configuration,
+# exposing the MCP proxy on port 9856 without going through Envoy Gateway's Envoy.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-proxy-config
+  namespace: default
+data:
+  mcp-servers.json: |
+    {
+      "mcpServers": {
+        "kiwi": {
+          "type": "http",
+          "url": "https://mcp.kiwi.com/"
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-proxy-direct
+  namespace: default
+  labels:
+    app: mcp-proxy-direct
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-proxy-direct
+  template:
+    metadata:
+      labels:
+        app: mcp-proxy-direct
+    spec:
+      containers:
+        - name: aigw
+          image: docker.io/envoyproxy/ai-gateway-cli:latest
+          args:
+            - run
+            - --mcp-config
+            - /etc/mcp/mcp-servers.json
+            - --admin-port
+            - "1064"
+            - --debug
+          ports:
+            - name: http
+              containerPort: 1975
+              protocol: TCP
+            - name: admin
+              containerPort: 1064
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mcp
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 1064
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 1064
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: mcp-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-proxy-direct
+  namespace: default
+  labels:
+    app: mcp-proxy-direct
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-proxy-direct
+  ports:
+    - name: http
+      port: 1975
+      targetPort: 1975
+      protocol: TCP
+    - name: admin
+      port: 1064
+      targetPort: 1064
+      protocol: TCP
